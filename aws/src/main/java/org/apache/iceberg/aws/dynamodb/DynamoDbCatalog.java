@@ -105,8 +105,8 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   private static final String PROPERTY_DEFAULT_LOCATION = "default_location";
   private static final String COL_CREATED_AT = "created_at";
   private static final String COL_UPDATED_AT = "updated_at";
-  private static final String TABLE_TYPE = "TABLE";
-  private static final String VIEW_TYPE = "VIEW";
+  static final String TABLE_TYPE = "TABLE";
+  static final String VIEW_TYPE = "VIEW";
 
   // field used for optimistic locking
   static final String COL_VERSION = "v";

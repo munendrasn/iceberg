@@ -217,6 +217,7 @@ class DynamoDbTableOperations extends BaseMetastoreTableOperations {
         attributeValues.put(
             attributeValue, AttributeValue.builder().s(property.getValue()).build());
       }
+      // todo: check if backfill is required for table entries
       DynamoDbCatalog.updateCatalogEntryMetadata(updateParts, attributeValues);
       String updateExpression = "SET " + DynamoDbCatalog.COMMA.join(updateParts);
       attributeValues.put(":v", table.item().get(DynamoDbCatalog.COL_VERSION));
@@ -236,7 +237,7 @@ class DynamoDbTableOperations extends BaseMetastoreTableOperations {
       parameters.forEach(
           (k, v) ->
               values.put(DynamoDbCatalog.toPropertyCol(k), AttributeValue.builder().s(v).build()));
-      DynamoDbCatalog.setNewCatalogEntryMetadata(values);
+      DynamoDbCatalog.setNewCatalogEntryMetadataWithType(values, DynamoDbCatalog.TABLE_TYPE);
 
       dynamo.putItem(
           PutItemRequest.builder()
