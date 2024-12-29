@@ -415,6 +415,8 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     if (!fromResponse.hasItem()) {
       throw new NoSuchTableException(
           "Cannot rename table %s to %s: %s does not exist", from, to, from);
+    } else if (isIcebergView(fromResponse.item())) {
+      throw new ValidationException("Cannot rename table %s to %s: %s is a view", from, to, from);
     }
 
     GetItemResponse toResponse =
@@ -434,7 +436,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
         .filter(e -> isProperty(e.getKey()))
         .forEach(e -> toKey.put(e.getKey(), e.getValue()));
 
-    setNewCatalogEntryMetadata(toKey);
+    setNewCatalogEntryMetadataWithType(toKey, TABLE_TYPE);
 
     dynamo.transactWriteItems(
         TransactWriteItemsRequest.builder()
@@ -537,7 +539,69 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   }
 
   @Override
-  public void renameView(TableIdentifier from, TableIdentifier to) {}
+  public void renameView(TableIdentifier from, TableIdentifier to) {
+    Map<String, AttributeValue> fromKey = tablePrimaryKey(from);
+    Map<String, AttributeValue> toKey = tablePrimaryKey(to);
+
+    GetItemResponse fromResponse =
+        dynamo.getItem(
+            GetItemRequest.builder()
+                .tableName(awsProperties.dynamoDbTableName())
+                .consistentRead(true)
+                .key(fromKey)
+                .build());
+
+    if (!fromResponse.hasItem()) {
+      throw new NoSuchViewException(
+          "Cannot rename view %s to %s: %s does not exist", from, to, from);
+    } else if (isIcebergTable(fromResponse.item())) {
+      throw new ValidationException("Cannot rename view %s to %s: %s is a table", from, to, from);
+    }
+
+    GetItemResponse toResponse =
+        dynamo.getItem(
+            GetItemRequest.builder()
+                .tableName(awsProperties.dynamoDbTableName())
+                .consistentRead(true)
+                .key(toKey)
+                .build());
+
+    if (toResponse.hasItem()) {
+      throw new AlreadyExistsException(
+          "Cannot rename view %s to %s: %s already exists", from, to, to);
+    }
+
+    fromResponse.item().entrySet().stream()
+        .filter(e -> isProperty(e.getKey()))
+        .forEach(e -> toKey.put(e.getKey(), e.getValue()));
+
+    setNewCatalogEntryMetadataWithType(toKey, VIEW_TYPE);
+
+    dynamo.transactWriteItems(
+        TransactWriteItemsRequest.builder()
+            .transactItems(
+                TransactWriteItem.builder()
+                    .delete(
+                        Delete.builder()
+                            .tableName(awsProperties.dynamoDbTableName())
+                            .key(fromKey)
+                            .conditionExpression(COL_VERSION + " = :v")
+                            .expressionAttributeValues(
+                                ImmutableMap.of(":v", fromResponse.item().get(COL_VERSION)))
+                            .build())
+                    .build(),
+                TransactWriteItem.builder()
+                    .put(
+                        Put.builder()
+                            .tableName(awsProperties.dynamoDbTableName())
+                            .item(toKey)
+                            .conditionExpression("attribute_not_exists(" + COL_VERSION + ")")
+                            .build())
+                    .build())
+            .build());
+
+    LOG.info("Successfully renamed view from {} to {}", from, to);
+  }
 
   @Override
   public void setConf(Configuration conf) {
@@ -607,6 +671,12 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     values.put(COL_CREATED_AT, AttributeValue.builder().n(current).build());
     values.put(COL_UPDATED_AT, AttributeValue.builder().n(current).build());
     values.put(COL_VERSION, AttributeValue.builder().s(UUID.randomUUID().toString()).build());
+  }
+
+  static void setNewCatalogEntryMetadataWithType(
+      Map<String, AttributeValue> values, String tableType) {
+    setNewCatalogEntryMetadata(values);
+    values.put(COL_ICEBERG_TYPE, AttributeValue.builder().s(tableType).build());
   }
 
   static void updateCatalogEntryMetadata(
