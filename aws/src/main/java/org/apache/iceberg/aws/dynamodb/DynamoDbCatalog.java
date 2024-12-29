@@ -359,7 +359,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       if (response.hasItems()) {
         for (Map<String, AttributeValue> item : response.items()) {
           String identifier = item.get(COL_IDENTIFIER).s();
-          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier)) {
+          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier) && isIcebergTable(item)) {
             identifiers.add(TableIdentifier.of(identifier.split("\\.")));
           }
         }
@@ -384,11 +384,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
 
       if (!response.hasItem()) {
         throw new NoSuchTableException("Cannot find table %s to drop", identifier);
-      }
-
-      Map<String, AttributeValue> item = response.item();
-      if (item.containsKey(COL_ICEBERG_TYPE)
-          && !TABLE_TYPE.equals(item.get(COL_ICEBERG_TYPE).s())) {
+      } else if (!isIcebergTable(response.item())) {
         throw new NoSuchTableException("Cannot find iceberg table %s to drop", identifier);
       }
 
@@ -494,7 +490,34 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
 
   @Override
   public List<TableIdentifier> listViews(Namespace namespace) {
-    return List.of();
+    List<TableIdentifier> identifiers = Lists.newArrayList();
+    Map<String, AttributeValue> lastEvaluatedKey = null;
+    String condition = COL_NAMESPACE + " = :ns";
+    Map<String, AttributeValue> conditionValues =
+        ImmutableMap.of(":ns", AttributeValue.builder().s(namespace.toString()).build());
+    do {
+      QueryResponse response =
+          dynamo.query(
+              QueryRequest.builder()
+                  .tableName(awsProperties.dynamoDbTableName())
+                  .indexName(GSI_NAMESPACE_IDENTIFIER)
+                  .keyConditionExpression(condition)
+                  .expressionAttributeValues(conditionValues)
+                  .exclusiveStartKey(lastEvaluatedKey)
+                  .build());
+
+      if (response.hasItems()) {
+        for (Map<String, AttributeValue> item : response.items()) {
+          String identifier = item.get(COL_IDENTIFIER).s();
+          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier) && isIcebergView(item)) {
+            identifiers.add(TableIdentifier.of(identifier.split("\\.")));
+          }
+        }
+      }
+
+      lastEvaluatedKey = response.lastEvaluatedKey();
+    } while (!lastEvaluatedKey.isEmpty());
+    return identifiers;
   }
 
   @Override
@@ -511,11 +534,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
 
       if (!response.hasItem()) {
         throw new NoSuchViewException("Cannot find view %s to drop", identifier);
-      }
-      Map<String, AttributeValue> item = response.item();
-      // iceberg_type doesn't exist or not equal to view
-      if (!item.containsKey(COL_ICEBERG_TYPE)
-          || !VIEW_TYPE.equals(item.get(COL_ICEBERG_TYPE).s())) {
+      } else if (!isIcebergView(response.item())) {
         throw new NoSuchIcebergViewException("Cannot find iceberg view %s to drop", identifier);
       }
 
@@ -576,6 +595,17 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
 
   static String toPropertyKey(String propertyCol) {
     return propertyCol.substring(PROPERTY_COL_PREFIX.length());
+  }
+
+  static boolean isIcebergView(Map<String, AttributeValue> values) {
+    return values.containsKey(COL_ICEBERG_TYPE)
+        && VIEW_TYPE.equalsIgnoreCase(values.get(COL_ICEBERG_TYPE).s());
+  }
+
+  static boolean isIcebergTable(Map<String, AttributeValue> values) {
+    return !values.containsKey(COL_ICEBERG_TYPE)
+        || (values.containsKey(COL_ICEBERG_TYPE)
+            && TABLE_TYPE.equalsIgnoreCase(values.get(COL_ICEBERG_TYPE).s()));
   }
 
   static Map<String, AttributeValue> namespacePrimaryKey(Namespace namespace) {
