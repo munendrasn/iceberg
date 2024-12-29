@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
@@ -340,34 +341,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
 
   @Override
   public List<TableIdentifier> listTables(Namespace namespace) {
-    List<TableIdentifier> identifiers = Lists.newArrayList();
-    Map<String, AttributeValue> lastEvaluatedKey = null;
-    String condition = COL_NAMESPACE + " = :ns";
-    Map<String, AttributeValue> conditionValues =
-        ImmutableMap.of(":ns", AttributeValue.builder().s(namespace.toString()).build());
-    do {
-      QueryResponse response =
-          dynamo.query(
-              QueryRequest.builder()
-                  .tableName(awsProperties.dynamoDbTableName())
-                  .indexName(GSI_NAMESPACE_IDENTIFIER)
-                  .keyConditionExpression(condition)
-                  .expressionAttributeValues(conditionValues)
-                  .exclusiveStartKey(lastEvaluatedKey)
-                  .build());
-
-      if (response.hasItems()) {
-        for (Map<String, AttributeValue> item : response.items()) {
-          String identifier = item.get(COL_IDENTIFIER).s();
-          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier) && isIcebergTable(item)) {
-            identifiers.add(TableIdentifier.of(identifier.split("\\.")));
-          }
-        }
-      }
-
-      lastEvaluatedKey = response.lastEvaluatedKey();
-    } while (!lastEvaluatedKey.isEmpty());
-    return identifiers;
+    return listEntities(namespace, DynamoDbCatalog::isIcebergTable);
   }
 
   @Override
@@ -488,13 +462,14 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     LOG.info("Successfully renamed table from {} to {}", from, to);
   }
 
-  @Override
-  public List<TableIdentifier> listViews(Namespace namespace) {
+  private List<TableIdentifier> listEntities(
+      Namespace namespace, Function<Map<String, AttributeValue>, Boolean> typeEvaluator) {
     List<TableIdentifier> identifiers = Lists.newArrayList();
     Map<String, AttributeValue> lastEvaluatedKey = null;
     String condition = COL_NAMESPACE + " = :ns";
     Map<String, AttributeValue> conditionValues =
         ImmutableMap.of(":ns", AttributeValue.builder().s(namespace.toString()).build());
+    // todo: use page iterator, and filter by type on dynamo
     do {
       QueryResponse response =
           dynamo.query(
@@ -509,7 +484,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       if (response.hasItems()) {
         for (Map<String, AttributeValue> item : response.items()) {
           String identifier = item.get(COL_IDENTIFIER).s();
-          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier) && isIcebergView(item)) {
+          if (!COL_IDENTIFIER_NAMESPACE.equals(identifier) && typeEvaluator.apply(item)) {
             identifiers.add(TableIdentifier.of(identifier.split("\\.")));
           }
         }
@@ -518,6 +493,11 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       lastEvaluatedKey = response.lastEvaluatedKey();
     } while (!lastEvaluatedKey.isEmpty());
     return identifiers;
+  }
+
+  @Override
+  public List<TableIdentifier> listViews(Namespace namespace) {
+    return listEntities(namespace, DynamoDbCatalog::isIcebergView);
   }
 
   @Override
