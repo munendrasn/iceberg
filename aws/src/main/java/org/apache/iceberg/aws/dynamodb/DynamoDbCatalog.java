@@ -26,7 +26,6 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.BaseMetastoreCatalog;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.TableMetadata;
@@ -39,8 +38,10 @@ import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
+import org.apache.iceberg.exceptions.NoSuchIcebergViewException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.NoSuchViewException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.io.CloseableGroup;
@@ -54,6 +55,8 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.LocationUtil;
 import org.apache.iceberg.util.Tasks;
+import org.apache.iceberg.view.BaseMetastoreViewCatalog;
+import org.apache.iceberg.view.ViewOperations;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -85,7 +88,7 @@ import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 /** DynamoDB implementation of Iceberg catalog */
-public class DynamoDbCatalog extends BaseMetastoreCatalog
+public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     implements SupportsNamespaces, Configurable {
 
   private static final Logger LOG = LoggerFactory.getLogger(DynamoDbCatalog.class);
@@ -96,10 +99,13 @@ public class DynamoDbCatalog extends BaseMetastoreCatalog
   private static final String COL_IDENTIFIER = "identifier";
   private static final String COL_IDENTIFIER_NAMESPACE = "NAMESPACE";
   private static final String COL_NAMESPACE = "namespace";
+  private static final String COL_ICEBERG_TYPE = "iceberg_type";
   private static final String PROPERTY_COL_PREFIX = "p.";
   private static final String PROPERTY_DEFAULT_LOCATION = "default_location";
   private static final String COL_CREATED_AT = "created_at";
   private static final String COL_UPDATED_AT = "updated_at";
+  private static final String TABLE_TYPE = "TABLE";
+  private static final String VIEW_TYPE = "VIEW";
 
   // field used for optimistic locking
   static final String COL_VERSION = "v";
@@ -114,6 +120,11 @@ public class DynamoDbCatalog extends BaseMetastoreCatalog
   private Map<String, String> catalogProperties;
 
   public DynamoDbCatalog() {}
+
+  @Override
+  protected ViewOperations newViewOps(TableIdentifier identifier) {
+    return null;
+  }
 
   @Override
   public void initialize(String name, Map<String, String> properties) {
@@ -375,6 +386,12 @@ public class DynamoDbCatalog extends BaseMetastoreCatalog
         throw new NoSuchTableException("Cannot find table %s to drop", identifier);
       }
 
+      Map<String, AttributeValue> item = response.item();
+      if (item.containsKey(COL_ICEBERG_TYPE)
+          && !TABLE_TYPE.equals(item.get(COL_ICEBERG_TYPE).s())) {
+        throw new NoSuchTableException("Cannot find iceberg table %s to drop", identifier);
+      }
+
       TableOperations ops = newTableOps(identifier);
       TableMetadata lastMetadata = null;
       if (purge) {
@@ -474,6 +491,54 @@ public class DynamoDbCatalog extends BaseMetastoreCatalog
 
     LOG.info("Successfully renamed table from {} to {}", from, to);
   }
+
+  @Override
+  public List<TableIdentifier> listViews(Namespace namespace) {
+    return List.of();
+  }
+
+  @Override
+  public boolean dropView(TableIdentifier identifier) {
+    Map<String, AttributeValue> key = tablePrimaryKey(identifier);
+    try {
+      GetItemResponse response =
+          dynamo.getItem(
+              GetItemRequest.builder()
+                  .tableName(awsProperties.dynamoDbTableName())
+                  .consistentRead(true)
+                  .key(key)
+                  .build());
+
+      if (!response.hasItem()) {
+        throw new NoSuchViewException("Cannot find view %s to drop", identifier);
+      }
+      Map<String, AttributeValue> item = response.item();
+      // iceberg_type doesn't exist or not equal to view
+      if (!item.containsKey(COL_ICEBERG_TYPE)
+          || !VIEW_TYPE.equals(item.get(COL_ICEBERG_TYPE).s())) {
+        throw new NoSuchIcebergViewException("Cannot find iceberg view %s to drop", identifier);
+      }
+
+      dynamo.deleteItem(
+          DeleteItemRequest.builder()
+              .tableName(awsProperties.dynamoDbTableName())
+              .key(tablePrimaryKey(identifier))
+              .conditionExpression(COL_VERSION + " = :v")
+              .expressionAttributeValues(ImmutableMap.of(":v", response.item().get(COL_VERSION)))
+              .build());
+      LOG.info("Successfully dropped view {} from DynamoDb catalog", identifier);
+      return true;
+    } catch (ConditionalCheckFailedException e) {
+      LOG.error("Cannot complete drop view operation for {}: commit conflict", identifier, e);
+      return false;
+    } catch (Exception e) {
+      LOG.error("Cannot complete drop view operation for {}: unexpected exception", identifier, e);
+      throw e;
+    }
+  }
+
+  @Override
+  public void renameView(TableIdentifier from, TableIdentifier to) {}
 
   @Override
   public void setConf(Configuration conf) {
@@ -625,7 +690,10 @@ public class DynamoDbCatalog extends BaseMetastoreCatalog
                             .keyType(KeyType.RANGE)
                             .build())
                     .projection(
-                        Projection.builder().projectionType(ProjectionType.KEYS_ONLY).build())
+                        Projection.builder()
+                            .projectionType(ProjectionType.INCLUDE)
+                            .nonKeyAttributes(COL_ICEBERG_TYPE)
+                            .build())
                     .build())
             .billingMode(BillingMode.PAY_PER_REQUEST)
             .build());
