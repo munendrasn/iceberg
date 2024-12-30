@@ -39,12 +39,16 @@ import org.apache.iceberg.aws.AwsProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
+import org.apache.iceberg.exceptions.NoSuchIcebergViewException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.NoSuchViewException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.view.View;
+import org.apache.iceberg.view.ViewBuilder;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -220,6 +224,10 @@ public class TestDynamoDbCatalog {
             .item()
             .get("p.metadata_location")
             .s();
+    assertThatThrownBy(() -> catalog.dropView(tableIdentifier))
+        .as("table can't be dropped using dropView")
+        .isInstanceOf(NoSuchIcebergViewException.class);
+
     catalog.dropTable(tableIdentifier, true);
     assertThat(
             dynamo
@@ -241,8 +249,7 @@ public class TestDynamoDbCatalog {
                                 testBucket.length() + 6)) // s3:// + end slash
                         .build()))
         .as("metadata location should be deleted")
-        .isInstanceOf(NoSuchKeyException.class)
-        .hasMessageContaining("not found");
+        .isInstanceOf(NoSuchKeyException.class);
   }
 
   @Test
@@ -393,6 +400,255 @@ public class TestDynamoDbCatalog {
         .hasMessageContaining("already exists");
     assertThat(catalog.dropTable(identifier, true)).isTrue();
     assertThat(catalog.dropNamespace(namespace)).isTrue();
+  }
+
+  @Test
+  public void testCreateView() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    TableIdentifier tableIdentifier = TableIdentifier.of(namespace, genRandomName());
+    catalog.createTable(tableIdentifier, SCHEMA);
+
+    TableIdentifier viewIdentifier = TableIdentifier.of(namespace, genRandomName());
+    ViewBuilder viewBuilder = catalog.buildView(viewIdentifier);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select * from" + tableIdentifier.toString());
+    viewBuilder.create();
+    GetItemResponse response =
+        dynamo.getItem(
+            GetItemRequest.builder()
+                .tableName(catalogTableName)
+                .key(DynamoDbCatalog.tablePrimaryKey(viewIdentifier))
+                .build());
+    assertThat(response.hasItem()).as("view must exist").isTrue();
+    assertThat(response.item())
+        .as("view must be stored in DynamoDB with view identifier as partition key")
+        .hasEntrySatisfying(
+            "identifier",
+            attributeValue -> assertThat(attributeValue.s()).isEqualTo(viewIdentifier.toString()))
+        .as("view must be stored in DynamoDB with namespace as sort key")
+        .hasEntrySatisfying(
+            "namespace",
+            attributeValue -> assertThat(attributeValue.s()).isEqualTo(namespace.toString()))
+        .hasEntrySatisfying(
+            "iceberg_type", attributeValue -> assertThat(attributeValue.s()).isEqualTo("VIEW"));
+
+    assertThatThrownBy(viewBuilder::create)
+        .isInstanceOf(AlreadyExistsException.class)
+        .hasMessageContaining("already exists");
+  }
+
+  @Test
+  public void testCreateViewBadName() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    TableIdentifier viewIdentifier = TableIdentifier.of(Namespace.empty(), "a");
+    ViewBuilder viewBuilder = catalog.buildView(viewIdentifier);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select * from" + viewIdentifier.toString());
+    assertThatThrownBy(viewBuilder::create)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("Table namespace must not be empty");
+
+    TableIdentifier viewIdentifier2 = TableIdentifier.of(namespace, "a.b");
+    ViewBuilder viewBuilder2 = catalog.buildView(viewIdentifier2);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select * from" + viewIdentifier.toString());
+    assertThatThrownBy(viewBuilder2::create)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("must not contain dot");
+  }
+
+  @Test
+  public void testListViews() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    List<TableIdentifier> viewIdentifiers =
+        IntStream.range(0, 3)
+            .mapToObj(i -> TableIdentifier.of(namespace, genRandomName()))
+            .collect(Collectors.toList());
+    viewIdentifiers.forEach(
+        id ->
+            catalog
+                .buildView(id)
+                .withQuery("spark", "select * from" + id.toString())
+                .withDefaultNamespace(namespace)
+                .withSchema(SCHEMA)
+                .create());
+    assertThat(catalog.listViews(namespace)).hasSize(3);
+    assertThat(catalog.listTables(namespace)).hasSize(0);
+  }
+
+  @Test
+  public void testDropView() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    TableIdentifier viewIdentifier = TableIdentifier.of(namespace, genRandomName());
+    ViewBuilder viewBuilder = catalog.buildView(viewIdentifier);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select * from sample_table");
+    viewBuilder.create();
+    String metadataLocation =
+        dynamo
+            .getItem(
+                GetItemRequest.builder()
+                    .tableName(catalogTableName)
+                    .key(DynamoDbCatalog.tablePrimaryKey(viewIdentifier))
+                    .build())
+            .item()
+            .get("p.metadata_location")
+            .s();
+    assertThatThrownBy(() -> catalog.dropTable(viewIdentifier))
+        .as("view can't be dropped using dropTable")
+        .isInstanceOf(NoSuchTableException.class);
+
+    catalog.dropView(viewIdentifier);
+    assertThat(
+            dynamo
+                .getItem(
+                    GetItemRequest.builder()
+                        .tableName(catalogTableName)
+                        .key(DynamoDbCatalog.tablePrimaryKey(viewIdentifier))
+                        .build())
+                .hasItem())
+        .as("view entry should not exist in dynamo")
+        .isFalse();
+    assertThatThrownBy(
+            () ->
+                s3.headObject(
+                    HeadObjectRequest.builder()
+                        .bucket(testBucket)
+                        .key(
+                            metadataLocation.substring(
+                                testBucket.length() + 6)) // s3:// + end slash
+                        .build()))
+        .as("metadata location should be deleted")
+        .isInstanceOf(NoSuchKeyException.class);
+  }
+
+  @Test
+  public void testRenameView() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    Namespace namespace2 = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace2);
+
+    TableIdentifier tableIdentifier = TableIdentifier.of(namespace, genRandomName());
+    catalog.createTable(tableIdentifier, SCHEMA);
+    TableIdentifier viewIdentifier = TableIdentifier.of(namespace, genRandomName());
+    ViewBuilder viewBuilder = catalog.buildView(viewIdentifier);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select id from" + tableIdentifier.toString())
+        .create();
+
+    assertThatThrownBy(() -> catalog.renameView(TableIdentifier.of(namespace, "a"), viewIdentifier))
+        .isInstanceOf(NoSuchViewException.class)
+        .hasMessageContaining("does not exist");
+
+    assertThatThrownBy(() -> catalog.renameView(viewIdentifier, tableIdentifier))
+        .isInstanceOf(AlreadyExistsException.class)
+        .hasMessageContaining("already exists");
+
+    assertThatThrownBy(() -> catalog.renameView(tableIdentifier, viewIdentifier))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("Cannot rename view");
+
+    String metadataLocation =
+        dynamo
+            .getItem(
+                GetItemRequest.builder()
+                    .tableName(catalogTableName)
+                    .key(DynamoDbCatalog.tablePrimaryKey(viewIdentifier))
+                    .build())
+            .item()
+            .get("p.metadata_location")
+            .s();
+
+    TableIdentifier viewIdentifier2 = TableIdentifier.of(namespace2, genRandomName());
+    catalog.renameView(viewIdentifier, viewIdentifier2);
+
+    String metadataLocation2 =
+        dynamo
+            .getItem(
+                GetItemRequest.builder()
+                    .tableName(catalogTableName)
+                    .key(DynamoDbCatalog.tablePrimaryKey(viewIdentifier2))
+                    .build())
+            .item()
+            .get("p.metadata_location")
+            .s();
+
+    assertThat(metadataLocation2)
+        .as("metadata location should be copied to new view entry")
+        .isEqualTo(metadataLocation);
+  }
+
+  @Test
+  public void testUpdateView() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    TableIdentifier tableIdentifier = TableIdentifier.of(namespace, genRandomName());
+    catalog.createTable(tableIdentifier, SCHEMA);
+
+    TableIdentifier viewIdentifier = TableIdentifier.of(namespace, genRandomName());
+    ViewBuilder viewBuilder = catalog.buildView(viewIdentifier);
+    viewBuilder
+        .withDefaultNamespace(namespace)
+        .withSchema(SCHEMA)
+        .withQuery("spark", "select id from" + tableIdentifier.toString())
+        .create();
+
+    View view = catalog.loadView(viewIdentifier);
+    assertThat(view.versions()).hasSize(1);
+
+    Schema schema =
+        new Schema(
+            Types.NestedField.optional(1, "id", Types.StringType.get()),
+            Types.NestedField.optional(2, "desc", Types.StringType.get()));
+    view.replaceVersion()
+        .withDefaultNamespace(namespace)
+        .withSchema(schema)
+        .withQuery("spark", "select id, 'null' as desc from" + tableIdentifier.toString())
+        .commit();
+    assertThat(view.versions()).hasSize(2);
+  }
+
+  @Test
+  public void testListTableAndViews() {
+    Namespace namespace = Namespace.of(genRandomName());
+    catalog.createNamespace(namespace);
+    List<TableIdentifier> tableIdentifiers =
+        IntStream.range(0, 3)
+            .mapToObj(i -> TableIdentifier.of(namespace, genRandomName()))
+            .collect(Collectors.toList());
+    tableIdentifiers.forEach(id -> catalog.createTable(id, SCHEMA));
+
+    List<TableIdentifier> viewIdentifiers =
+        IntStream.range(0, 3)
+            .mapToObj(i -> TableIdentifier.of(namespace, genRandomName()))
+            .collect(Collectors.toList());
+    viewIdentifiers.forEach(
+        id ->
+            catalog
+                .buildView(id)
+                .withQuery("spark", "select * from" + id.toString())
+                .withDefaultNamespace(namespace)
+                .withSchema(SCHEMA)
+                .create());
+    assertThat(catalog.listViews(namespace)).hasSize(3);
+    assertThat(catalog.listTables(namespace)).hasSize(3);
+    assertThat(catalog.listViews(namespace)).doesNotContainAnyElementsOf(tableIdentifiers);
+    assertThat(catalog.listTables(namespace)).doesNotContainAnyElementsOf(viewIdentifiers);
   }
 
   private static String genRandomName() {

@@ -57,6 +57,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.LocationUtil;
 import org.apache.iceberg.util.Tasks;
 import org.apache.iceberg.view.BaseMetastoreViewCatalog;
+import org.apache.iceberg.view.ViewMetadata;
 import org.apache.iceberg.view.ViewOperations;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -483,6 +484,13 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       } else if (!isIcebergView(response.item())) {
         throw new NoSuchIcebergViewException("Cannot find iceberg view %s to drop", identifier);
       }
+      DynamoDbViewOperations ops = (DynamoDbViewOperations) newViewOps(identifier);
+      ViewMetadata lastViewMetadata = null;
+      try {
+        lastViewMetadata = ops.current();
+      } catch (NotFoundException e) {
+        LOG.warn("Failed to load view metadata for view: {}", identifier, e);
+      }
 
       dynamo.deleteItem(
           DeleteItemRequest.builder()
@@ -491,6 +499,10 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
               .conditionExpression(COL_VERSION + " = :v")
               .expressionAttributeValues(ImmutableMap.of(":v", response.item().get(COL_VERSION)))
               .build());
+
+      if (lastViewMetadata != null) {
+        CatalogUtil.dropViewMetadata(ops.io(), lastViewMetadata);
+      }
       LOG.info("Successfully dropped view {} from DynamoDb catalog", identifier);
       return true;
     } catch (ConditionalCheckFailedException e) {
