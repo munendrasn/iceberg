@@ -224,9 +224,7 @@ class DynamoDbViewOperations extends BaseViewOperations {
     } else {
       LOG.debug("Committing new DynamoDb catalog view: {}", viewName());
       Map<String, AttributeValue> values = Maps.newHashMap(tableKey);
-      parameters.forEach(
-          (k, v) ->
-              values.put(DynamoDbCatalog.toPropertyCol(k), AttributeValue.builder().s(v).build()));
+      DynamoDbCatalog.addCatalogEntryMetadata(parameters, values);
       DynamoDbCatalog.setNewCatalogEntryMetadataWithType(values, DynamoDbCatalog.VIEW_TYPE);
 
       dynamo.putItem(

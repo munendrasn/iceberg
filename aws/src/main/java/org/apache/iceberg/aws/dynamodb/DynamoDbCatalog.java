@@ -175,13 +175,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   @Override
   protected String defaultWarehouseLocation(TableIdentifier tableIdentifier) {
     validateTableIdentifier(tableIdentifier);
-    GetItemResponse response =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(namespacePrimaryKey(tableIdentifier.namespace()))
-                .build());
+    GetItemResponse response = getItem(namespacePrimaryKey(tableIdentifier.namespace()));
 
     if (!response.hasItem()) {
       throw new NoSuchNamespaceException(
@@ -204,8 +198,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     validateNamespace(namespace);
     Map<String, AttributeValue> values = namespacePrimaryKey(namespace);
     setNewCatalogEntryMetadata(values);
-    metadata.forEach(
-        (key, value) -> values.put(toPropertyCol(key), AttributeValue.builder().s(value).build()));
+    addCatalogEntryMetadata(metadata, values);
 
     try {
       dynamo.putItem(
@@ -261,13 +254,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   public Map<String, String> loadNamespaceMetadata(Namespace namespace)
       throws NoSuchNamespaceException {
     validateNamespace(namespace);
-    GetItemResponse response =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(namespacePrimaryKey(namespace))
-                .build());
+    GetItemResponse response = getItem(namespacePrimaryKey(namespace));
 
     if (!response.hasItem()) {
       throw new NoSuchNamespaceException("Cannot find namespace %s", namespace);
@@ -349,13 +336,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   public boolean dropTable(TableIdentifier identifier, boolean purge) {
     Map<String, AttributeValue> key = tablePrimaryKey(identifier);
     try {
-      GetItemResponse response =
-          dynamo.getItem(
-              GetItemRequest.builder()
-                  .tableName(awsProperties.dynamoDbTableName())
-                  .consistentRead(true)
-                  .key(key)
-                  .build());
+      GetItemResponse response = getItem(key);
 
       if (!response.hasItem()) {
         throw new NoSuchTableException("Cannot find table %s to drop", identifier);
@@ -405,13 +386,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     Map<String, AttributeValue> fromKey = tablePrimaryKey(from);
     Map<String, AttributeValue> toKey = tablePrimaryKey(to);
 
-    GetItemResponse fromResponse =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(fromKey)
-                .build());
+    GetItemResponse fromResponse = getItem(fromKey);
 
     if (!fromResponse.hasItem()) {
       throw new NoSuchTableException(
@@ -420,13 +395,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       throw new ValidationException("Cannot rename table %s to %s: %s is a view", from, to, from);
     }
 
-    GetItemResponse toResponse =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(toKey)
-                .build());
+    GetItemResponse toResponse = getItem(toKey);
 
     if (toResponse.hasItem()) {
       throw new AlreadyExistsException(
@@ -507,13 +476,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   public boolean dropView(TableIdentifier identifier) {
     Map<String, AttributeValue> key = tablePrimaryKey(identifier);
     try {
-      GetItemResponse response =
-          dynamo.getItem(
-              GetItemRequest.builder()
-                  .tableName(awsProperties.dynamoDbTableName())
-                  .consistentRead(true)
-                  .key(key)
-                  .build());
+      GetItemResponse response = getItem(key);
 
       if (!response.hasItem()) {
         throw new NoSuchViewException("Cannot find view %s to drop", identifier);
@@ -544,13 +507,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     Map<String, AttributeValue> fromKey = tablePrimaryKey(from);
     Map<String, AttributeValue> toKey = tablePrimaryKey(to);
 
-    GetItemResponse fromResponse =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(fromKey)
-                .build());
+    GetItemResponse fromResponse = getItem(fromKey);
 
     if (!fromResponse.hasItem()) {
       throw new NoSuchViewException(
@@ -559,13 +516,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
       throw new ValidationException("Cannot rename view %s to %s: %s is a table", from, to, from);
     }
 
-    GetItemResponse toResponse =
-        dynamo.getItem(
-            GetItemRequest.builder()
-                .tableName(awsProperties.dynamoDbTableName())
-                .consistentRead(true)
-                .key(toKey)
-                .build());
+    GetItemResponse toResponse = getItem(toKey);
 
     if (toResponse.hasItem()) {
       throw new AlreadyExistsException(
@@ -619,6 +570,15 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     closeableGroup.close();
   }
 
+  private GetItemResponse getItem(Map<String, AttributeValue> key) {
+    return dynamo.getItem(
+        GetItemRequest.builder()
+            .tableName(awsProperties.dynamoDbTableName())
+            .consistentRead(true)
+            .key(key)
+            .build());
+  }
+
   /**
    * The property used to set a default location for tables in a namespace. Call {@link
    * #setProperties(Namespace, Map)} to set a path value using this property for a namespace, then
@@ -665,6 +625,12 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     key.put(COL_IDENTIFIER, AttributeValue.builder().s(identifier.toString()).build());
     key.put(COL_NAMESPACE, AttributeValue.builder().s(identifier.namespace().toString()).build());
     return key;
+  }
+
+  static void addCatalogEntryMetadata(
+      Map<String, String> parameters, Map<String, AttributeValue> values) {
+    parameters.forEach(
+        (k, v) -> values.put(toPropertyCol(k), AttributeValue.builder().s(v).build()));
   }
 
   static void setNewCatalogEntryMetadata(Map<String, AttributeValue> values) {

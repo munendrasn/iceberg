@@ -234,9 +234,7 @@ class DynamoDbTableOperations extends BaseMetastoreTableOperations {
     } else {
       LOG.debug("Committing new DynamoDb catalog table: {}", tableName());
       Map<String, AttributeValue> values = Maps.newHashMap(tableKey);
-      parameters.forEach(
-          (k, v) ->
-              values.put(DynamoDbCatalog.toPropertyCol(k), AttributeValue.builder().s(v).build()));
+      DynamoDbCatalog.addCatalogEntryMetadata(parameters, values);
       DynamoDbCatalog.setNewCatalogEntryMetadataWithType(values, DynamoDbCatalog.TABLE_TYPE);
 
       dynamo.putItem(
