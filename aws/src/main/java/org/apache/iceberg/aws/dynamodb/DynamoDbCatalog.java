@@ -403,11 +403,20 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
           "Cannot rename table %s to %s: %s already exists", from, to, to);
     }
 
+    renameTableOrView(fromKey, toKey, fromResponse, TABLE_TYPE);
+    LOG.info("Successfully renamed table from {} to {}", from, to);
+  }
+
+  private void renameTableOrView(
+      Map<String, AttributeValue> fromKey,
+      Map<String, AttributeValue> toKey,
+      GetItemResponse fromResponse,
+      String icebergType) {
     fromResponse.item().entrySet().stream()
         .filter(e -> isProperty(e.getKey()))
         .forEach(e -> toKey.put(e.getKey(), e.getValue()));
 
-    setNewCatalogEntryMetadataWithType(toKey, TABLE_TYPE);
+    setNewCatalogEntryMetadataWithType(toKey, icebergType);
 
     dynamo.transactWriteItems(
         TransactWriteItemsRequest.builder()
@@ -431,8 +440,6 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
                             .build())
                     .build())
             .build());
-
-    LOG.info("Successfully renamed table from {} to {}", from, to);
   }
 
   private List<TableIdentifier> listEntities(
@@ -535,34 +542,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
           "Cannot rename view %s to %s: %s already exists", from, to, to);
     }
 
-    fromResponse.item().entrySet().stream()
-        .filter(e -> isProperty(e.getKey()))
-        .forEach(e -> toKey.put(e.getKey(), e.getValue()));
-
-    setNewCatalogEntryMetadataWithType(toKey, VIEW_TYPE);
-
-    dynamo.transactWriteItems(
-        TransactWriteItemsRequest.builder()
-            .transactItems(
-                TransactWriteItem.builder()
-                    .delete(
-                        Delete.builder()
-                            .tableName(awsProperties.dynamoDbTableName())
-                            .key(fromKey)
-                            .conditionExpression(COL_VERSION + " = :v")
-                            .expressionAttributeValues(
-                                ImmutableMap.of(":v", fromResponse.item().get(COL_VERSION)))
-                            .build())
-                    .build(),
-                TransactWriteItem.builder()
-                    .put(
-                        Put.builder()
-                            .tableName(awsProperties.dynamoDbTableName())
-                            .item(toKey)
-                            .conditionExpression("attribute_not_exists(" + COL_VERSION + ")")
-                            .build())
-                    .build())
-            .build());
+    renameTableOrView(fromKey, toKey, fromResponse, VIEW_TYPE);
 
     LOG.info("Successfully renamed view from {} to {}", from, to);
   }
@@ -653,9 +633,9 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   }
 
   static void setNewCatalogEntryMetadataWithType(
-      Map<String, AttributeValue> values, String tableType) {
+      Map<String, AttributeValue> values, String icebergType) {
     setNewCatalogEntryMetadata(values);
-    values.put(COL_ICEBERG_TYPE, AttributeValue.builder().s(tableType).build());
+    values.put(COL_ICEBERG_TYPE, AttributeValue.builder().s(icebergType).build());
   }
 
   static void updateCatalogEntryMetadata(
