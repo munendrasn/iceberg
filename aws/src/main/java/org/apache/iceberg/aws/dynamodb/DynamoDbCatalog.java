@@ -123,11 +123,6 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   public DynamoDbCatalog() {}
 
   @Override
-  protected ViewOperations newViewOps(TableIdentifier identifier) {
-    return null;
-  }
-
-  @Override
   public void initialize(String name, Map<String, String> properties) {
     this.catalogProperties = ImmutableMap.copyOf(properties);
     initialize(
@@ -169,6 +164,12 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
   protected TableOperations newTableOps(TableIdentifier tableIdentifier) {
     validateTableIdentifier(tableIdentifier);
     return new DynamoDbTableOperations(dynamo, awsProperties, catalogName, fileIO, tableIdentifier);
+  }
+
+  @Override
+  protected ViewOperations newViewOps(TableIdentifier viewIdentifier) {
+    validateTableIdentifier(viewIdentifier);
+    return new DynamoDbViewOperations(dynamo, awsProperties, catalogName, fileIO, viewIdentifier);
   }
 
   @Override

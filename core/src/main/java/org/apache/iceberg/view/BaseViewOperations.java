@@ -132,6 +132,39 @@ public abstract class BaseViewOperations extends BaseMetastoreOperations impleme
         System.currentTimeMillis() - start);
   }
 
+  /**
+   * Attempt to load the view and see if any current or past metadata location matches the one we
+   * were attempting to set. This is used as a last resort when we are dealing with exceptions that
+   * may indicate the commit has failed but are not proof that this is the case. Past locations must
+   * also be searched on the chance that a second committer was able to successfully commit on top
+   * of our commit.
+   *
+   * @param newMetadataLocation the path of the new commit file
+   * @param config metadata to use for configuration
+   * @return Commit Status of Success, Failure or Unknown
+   */
+  protected CommitStatus checkCommitStatus(String newMetadataLocation, ViewMetadata config) {
+    return CommitStatus.valueOf(
+        checkCommitStatus(
+                viewName(),
+                newMetadataLocation,
+                config.properties(),
+                () -> checkCurrentMetadataLocation(newMetadataLocation))
+            .name());
+  }
+
+  /**
+   * Validate if the new metadata location is the current metadata location.
+   *
+   * @param newMetadataLocation newly written metadata location
+   * @return true if the new metadata location is the current metadata location
+   */
+  private boolean checkCurrentMetadataLocation(String newMetadataLocation) {
+    ViewMetadata metadata = refresh();
+    // todo: if there is way to check against previous versions
+    return newMetadataLocation.equals(metadata.metadataFileLocation());
+  }
+
   private String writeNewMetadata(ViewMetadata metadata, int newVersion) {
     String newMetadataFilePath = newMetadataFilePath(metadata, newVersion);
     OutputFile newMetadataLocation = io().newOutputFile(newMetadataFilePath);

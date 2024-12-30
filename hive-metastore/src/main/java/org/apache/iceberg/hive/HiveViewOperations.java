@@ -228,12 +228,7 @@ final class HiveViewOperations extends BaseViewOperations implements HiveOperati
             viewName,
             e);
         commitStatus = BaseMetastoreOperations.CommitStatus.UNKNOWN;
-        commitStatus =
-            checkCommitStatus(
-                viewName,
-                newMetadataLocation,
-                metadata.properties(),
-                () -> checkCurrentMetadataLocation(newMetadataLocation));
+        commitStatus = checkCommitStatus(newMetadataLocation, metadata);
         switch (commitStatus) {
           case SUCCESS:
             break;
@@ -260,17 +255,6 @@ final class HiveViewOperations extends BaseViewOperations implements HiveOperati
 
     LOG.info(
         "Committed to view {} with the new metadata location {}", fullName, newMetadataLocation);
-  }
-
-  /**
-   * Validate if the new metadata location is the current metadata location.
-   *
-   * @param newMetadataLocation newly written metadata location
-   * @return true if the new metadata location is the current metadata location
-   */
-  private boolean checkCurrentMetadataLocation(String newMetadataLocation) {
-    ViewMetadata metadata = refresh();
-    return newMetadataLocation.equals(metadata.metadataFileLocation());
   }
 
   private void setHmsTableParameters(
