@@ -18,14 +18,7 @@
  */
 package org.apache.iceberg.aws.dynamodb;
 
-import static org.apache.iceberg.BaseMetastoreTableOperations.METADATA_LOCATION_PROP;
-import static org.apache.iceberg.BaseMetastoreTableOperations.PREVIOUS_METADATA_LOCATION_PROP;
-
-import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
-import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.aws.AwsProperties;
 import org.apache.iceberg.aws.util.RetryDetector;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -33,8 +26,6 @@ import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchViewException;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.view.BaseViewOperations;
 import org.apache.iceberg.view.ViewMetadata;
 import org.slf4j.Logger;
@@ -42,12 +33,9 @@ import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
-import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
-class DynamoDbViewOperations extends BaseViewOperations {
+class DynamoDbViewOperations extends BaseViewOperations implements DynamoDbOperationsBase {
 
   private static final Logger LOG = LoggerFactory.getLogger(DynamoDbViewOperations.class);
   private static final String ICEBERG_VIEW_TYPE_VALUE = "iceberg-view";
@@ -74,9 +62,9 @@ class DynamoDbViewOperations extends BaseViewOperations {
   @Override
   protected void doRefresh() {
     String metadataLocation = null;
-    GetItemResponse table = getTableItem();
+    GetItemResponse table = getTableItem(viewIdentifier);
     if (table.hasItem() && DynamoDbCatalog.isIcebergView(table.item())) {
-      metadataLocation = DynamoDbTableOperations.getMetadataLocation(table);
+      metadataLocation = DynamoDbOperationsBase.getMetadataLocation(table);
     } else {
       if (currentMetadataLocation() != null) {
         throw new NoSuchViewException(
@@ -96,7 +84,7 @@ class DynamoDbViewOperations extends BaseViewOperations {
     RetryDetector retryDetector = new RetryDetector();
     Map<String, AttributeValue> tableKey = DynamoDbCatalog.tablePrimaryKey(viewIdentifier);
     try {
-      GetItemResponse table = getTableItem();
+      GetItemResponse table = getTableItem(viewIdentifier);
       checkMetadataLocation(table, base);
       Map<String, String> properties = prepareProperties(table, newMetadataLocation);
       persistTable(tableKey, table, properties, retryDetector);
@@ -143,25 +131,11 @@ class DynamoDbViewOperations extends BaseViewOperations {
     }
   }
 
-  private GetItemResponse getTableItem() {
-    Map<String, AttributeValue> tableKey = DynamoDbCatalog.tablePrimaryKey(viewIdentifier);
-    return dynamo.getItem(
-        GetItemRequest.builder()
-            .tableName(awsProperties.dynamoDbTableName())
-            .consistentRead(true)
-            .key(tableKey)
-            .build());
-  }
-
   private void checkMetadataLocation(GetItemResponse table, ViewMetadata base) {
     String dynamoMetadataLocation =
-        table.hasItem() ? DynamoDbTableOperations.getMetadataLocation(table) : null;
+        table.hasItem() ? DynamoDbOperationsBase.getMetadataLocation(table) : null;
     String baseMetadataLocation = base != null ? base.metadataFileLocation() : null;
-    if (!Objects.equals(baseMetadataLocation, dynamoMetadataLocation)) {
-      throw new CommitFailedException(
-          "Cannot commit %s because base metadata location '%s' is not same as the current DynamoDb location '%s'",
-          viewName(), baseMetadataLocation, dynamoMetadataLocation);
-    }
+    checkMetadataLocation(baseMetadataLocation, dynamoMetadataLocation);
   }
 
   @Override
@@ -176,64 +150,27 @@ class DynamoDbViewOperations extends BaseViewOperations {
 
   private Map<String, String> prepareProperties(
       GetItemResponse response, String newMetadataLocation) {
-    Map<String, String> properties =
-        response.hasItem() ? DynamoDbTableOperations.getProperties(response) : Maps.newHashMap();
-    properties.put(
-        BaseMetastoreTableOperations.TABLE_TYPE_PROP,
-        ICEBERG_VIEW_TYPE_VALUE.toUpperCase(Locale.ENGLISH));
-    properties.put(METADATA_LOCATION_PROP, newMetadataLocation);
-    if (currentMetadataLocation() != null && !currentMetadataLocation().isEmpty()) {
-      properties.put(PREVIOUS_METADATA_LOCATION_PROP, currentMetadataLocation());
-    }
-    return properties;
+    return DynamoDbOperationsBase.prepareProperties(
+        response, newMetadataLocation, ICEBERG_VIEW_TYPE_VALUE, currentMetadataLocation());
   }
 
-  void persistTable(
-      Map<String, AttributeValue> tableKey,
-      GetItemResponse table,
-      Map<String, String> parameters,
-      RetryDetector retryDetector) {
-    if (table.hasItem()) {
-      LOG.debug("Committing existing DynamoDb catalog view: {}", viewName());
-      List<String> updateParts = Lists.newArrayList();
-      Map<String, String> attributeNames = Maps.newHashMap();
-      Map<String, AttributeValue> attributeValues = Maps.newHashMap();
-      int idx = 0;
-      for (Map.Entry<String, String> property : parameters.entrySet()) {
-        String attributeValue = ":v" + idx;
-        String attributeKey = "#k" + idx;
-        idx++;
-        updateParts.add(attributeKey + " = " + attributeValue);
-        attributeNames.put(attributeKey, DynamoDbCatalog.toPropertyCol(property.getKey()));
-        attributeValues.put(
-            attributeValue, AttributeValue.builder().s(property.getValue()).build());
-      }
-      DynamoDbCatalog.updateCatalogEntryMetadata(updateParts, attributeValues);
-      String updateExpression = "SET " + DynamoDbCatalog.COMMA.join(updateParts);
-      attributeValues.put(":v", table.item().get(DynamoDbCatalog.COL_VERSION));
-      dynamo.updateItem(
-          UpdateItemRequest.builder()
-              .overrideConfiguration(c -> c.addMetricPublisher(retryDetector))
-              .tableName(awsProperties.dynamoDbTableName())
-              .key(tableKey)
-              .conditionExpression(DynamoDbCatalog.COL_VERSION + " = :v")
-              .updateExpression(updateExpression)
-              .expressionAttributeValues(attributeValues)
-              .expressionAttributeNames(attributeNames)
-              .build());
-    } else {
-      LOG.debug("Committing new DynamoDb catalog view: {}", viewName());
-      Map<String, AttributeValue> values = Maps.newHashMap(tableKey);
-      DynamoDbCatalog.addCatalogEntryMetadata(parameters, values);
-      DynamoDbCatalog.setNewCatalogEntryMetadataWithType(values, DynamoDbCatalog.VIEW_TYPE);
+  @Override
+  public String type() {
+    return DynamoDbCatalog.VIEW_TYPE;
+  }
 
-      dynamo.putItem(
-          PutItemRequest.builder()
-              .overrideConfiguration(c -> c.addMetricPublisher(retryDetector))
-              .tableName(awsProperties.dynamoDbTableName())
-              .item(values)
-              .conditionExpression("attribute_not_exists(" + DynamoDbCatalog.COL_VERSION + ")")
-              .build());
-    }
+  @Override
+  public String name() {
+    return viewName();
+  }
+
+  @Override
+  public DynamoDbClient dynamo() {
+    return dynamo;
+  }
+
+  @Override
+  public AwsProperties awsProperties() {
+    return awsProperties;
   }
 }
