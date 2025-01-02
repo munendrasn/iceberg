@@ -21,6 +21,7 @@ package org.apache.iceberg.aws.dynamodb;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -66,14 +67,18 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
+import software.amazon.awssdk.services.dynamodb.model.CreateGlobalSecondaryIndexAction;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.Delete;
+import software.amazon.awssdk.services.dynamodb.model.DeleteGlobalSecondaryIndexAction;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableResponse;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
+import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndexDescription;
+import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndexUpdate;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.Projection;
@@ -88,6 +93,7 @@ import software.amazon.awssdk.services.dynamodb.model.TableStatus;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
 
 /** DynamoDB implementation of Iceberg catalog */
 public class DynamoDbCatalog extends BaseMetastoreViewCatalog
@@ -154,6 +160,7 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     closeableGroup.setSuppressCloseFailure(true);
 
     ensureCatalogTableExistsOrCreate();
+    updateCatalogTableIfRequired();
   }
 
   @Override
@@ -686,6 +693,94 @@ public class DynamoDbCatalog extends BaseMetastoreViewCatalog
     } catch (ResourceNotFoundException e) {
       return false;
     }
+  }
+
+  private void updateCatalogTableIfRequired() {
+    if (!awsProperties.updateDynamoDbCatalogTable()) {
+      LOG.info(
+          "Skipping updating the Dynamo table {} as update is disabled",
+          awsProperties.dynamoDbTableName());
+      return;
+    }
+    DescribeTableResponse describeTableResponse =
+        dynamo.describeTable(
+            DescribeTableRequest.builder().tableName(awsProperties.dynamoDbTableName()).build());
+    Optional<GlobalSecondaryIndexDescription> namespaceIdentifierGsi =
+        describeTableResponse.table().globalSecondaryIndexes().stream()
+            .filter(index -> GSI_NAMESPACE_IDENTIFIER.equals(index.indexName()))
+            .findFirst();
+    boolean doesNotContainIcebergType = true;
+    if (namespaceIdentifierGsi.isPresent()) {
+      doesNotContainIcebergType =
+          !namespaceIdentifierGsi.get().projection().hasNonKeyAttributes()
+              || !namespaceIdentifierGsi
+                  .get()
+                  .projection()
+                  .nonKeyAttributes()
+                  .contains(COL_ICEBERG_TYPE);
+    }
+
+    if (!doesNotContainIcebergType) {
+      LOG.info(
+          "GSI {} contains for table {} attribute {} in projection, skipping update",
+          GSI_NAMESPACE_IDENTIFIER,
+          awsProperties.dynamoDbTableName(),
+          COL_ICEBERG_TYPE);
+      return;
+    }
+    if (namespaceIdentifierGsi.isPresent()) {
+      LOG.info(
+          "Deleting GSI {} for table {} to recreate the GSI with attribute {}",
+          GSI_NAMESPACE_IDENTIFIER,
+          awsProperties.dynamoDbTableName(),
+          COL_ICEBERG_TYPE);
+      dynamo.updateTable(
+          UpdateTableRequest.builder()
+              .tableName(awsProperties.dynamoDbTableName())
+              .globalSecondaryIndexUpdates(
+                  GlobalSecondaryIndexUpdate.builder()
+                      .delete(
+                          DeleteGlobalSecondaryIndexAction.builder()
+                              .indexName(GSI_NAMESPACE_IDENTIFIER)
+                              .build())
+                      .build())
+              .build());
+    }
+    // Not checking the GSI being Active as back-fill would take more time
+    dynamo.updateTable(
+        UpdateTableRequest.builder()
+            .tableName(awsProperties.dynamoDbTableName())
+            .attributeDefinitions(
+                AttributeDefinition.builder()
+                    .attributeName(COL_IDENTIFIER)
+                    .attributeType(ScalarAttributeType.S)
+                    .build(),
+                AttributeDefinition.builder()
+                    .attributeName(COL_NAMESPACE)
+                    .attributeType(ScalarAttributeType.S)
+                    .build())
+            .globalSecondaryIndexUpdates(
+                GlobalSecondaryIndexUpdate.builder()
+                    .create(
+                        CreateGlobalSecondaryIndexAction.builder()
+                            .indexName(GSI_NAMESPACE_IDENTIFIER)
+                            .keySchema(
+                                KeySchemaElement.builder()
+                                    .attributeName(COL_NAMESPACE)
+                                    .keyType(KeyType.HASH)
+                                    .build(),
+                                KeySchemaElement.builder()
+                                    .attributeName(COL_IDENTIFIER)
+                                    .keyType(KeyType.RANGE)
+                                    .build())
+                            .projection(
+                                Projection.builder()
+                                    .projectionType(ProjectionType.INCLUDE)
+                                    .nonKeyAttributes(COL_ICEBERG_TYPE)
+                                    .build())
+                            .build())
+                    .build())
+            .build());
   }
 
   private void ensureCatalogTableExistsOrCreate() {

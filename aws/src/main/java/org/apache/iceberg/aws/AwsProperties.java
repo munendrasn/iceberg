@@ -104,6 +104,9 @@ public class AwsProperties implements Serializable {
   /** DynamoDB table name for {@link DynamoDbCatalog} */
   public static final String DYNAMODB_TABLE_NAME = "dynamodb.table-name";
 
+  /** DynamoDB table {@link DynamoDbCatalog} should be updated */
+  public static final String DYNAMODB_UPDATE_TABLE = "dynamodb.update-table";
+
   public static final String DYNAMODB_TABLE_NAME_DEFAULT = "iceberg";
 
   /**
@@ -223,6 +226,7 @@ public class AwsProperties implements Serializable {
   private boolean glueLakeFormationEnabled;
 
   private String dynamoDbTableName;
+  private final boolean updateDynamoDbCatalogTable;
   private final String dynamoDbEndpoint;
 
   private String restSigningRegion;
@@ -249,6 +253,7 @@ public class AwsProperties implements Serializable {
     this.glueLakeFormationEnabled = GLUE_LAKEFORMATION_ENABLED_DEFAULT;
 
     this.dynamoDbEndpoint = null;
+    this.updateDynamoDbCatalogTable = false;
     this.dynamoDbTableName = DYNAMODB_TABLE_NAME_DEFAULT;
 
     this.restSigningName = REST_SIGNING_NAME_DEFAULT;
@@ -285,6 +290,8 @@ public class AwsProperties implements Serializable {
             properties, GLUE_LAKEFORMATION_ENABLED, GLUE_LAKEFORMATION_ENABLED_DEFAULT);
 
     this.dynamoDbEndpoint = properties.get(DYNAMODB_ENDPOINT);
+    this.updateDynamoDbCatalogTable =
+        PropertyUtil.propertyAsBoolean(properties, DYNAMODB_UPDATE_TABLE, false);
     this.dynamoDbTableName =
         PropertyUtil.propertyAsString(properties, DYNAMODB_TABLE_NAME, DYNAMODB_TABLE_NAME_DEFAULT);
 
@@ -357,6 +364,10 @@ public class AwsProperties implements Serializable {
 
   public void setDynamoDbTableName(String name) {
     this.dynamoDbTableName = name;
+  }
+
+  public boolean updateDynamoDbCatalogTable() {
+    return updateDynamoDbCatalogTable;
   }
 
   /**
