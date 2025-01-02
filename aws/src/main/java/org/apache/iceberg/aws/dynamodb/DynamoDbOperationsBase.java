@@ -44,7 +44,7 @@ import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 interface DynamoDbOperationsBase {
 
-  static final Logger LOG = LoggerFactory.getLogger(DynamoDbOperationsBase.class);
+  Logger LOG = LoggerFactory.getLogger(DynamoDbOperationsBase.class);
 
   String type();
 
